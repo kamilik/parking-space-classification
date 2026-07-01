@@ -44,9 +44,6 @@ from __future__ import annotations
 
 import logging
 import shutil
-import subprocess
-import tarfile
-import urllib.request
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -66,12 +63,8 @@ logger = logging.getLogger(__name__)
 # Константы
 # ---------------------------------------------------------------------------
 
-# URL архива PKLot с предварительно нарезанными изображениями парковочных мест.
-_PKLOT_URL: str = "http://www.inf.ufpr.br/lesoliveira/PKLot/PKLotSegmented.tar.gz"
-
-# Имя архива и корневой директории после распаковки.
-_ARCHIVE_NAME: str = "PKLotSegmented.tar.gz"
-_EXTRACTED_DIR_NAME: str = "PKLotSegmented"
+# Идентификатор датасета на Kaggle.
+_KAGGLE_DATASET: str = "blanderbuss/parking-lot-dataset"
 
 # Известные парковки внутри датасета.
 _PARKING_LOTS: tuple[str, ...] = ("PUCPR", "UFPR04", "UFPR05")
@@ -177,101 +170,26 @@ def _build_empty_imagefolder_tree(data_dir: Path) -> None:
             logger.debug("Директория готова: %s", target)
 
 
-def _download_archive(raw_dir: Path) -> Path:
+def _download_kaggle(dataset_id: str) -> Path:
     """
-    Загружает архив PKLotSegmented с сайта UFPR в директорию ``raw_dir``.
-
-    Если архив уже существует, загрузка пропускается.
+    Загружает датасет PKLot с Kaggle через библиотеку kagglehub.
 
     Параметры
     ----------
-    raw_dir:
-        Директория для хранения загруженных файлов.
+    dataset_id:
+        Идентификатор датасета на Kaggle (``"blanderbuss/parking-lot-dataset"``).
 
     Возвращает
     ----------
     Path
-        Путь к скачанному (или уже существующему) архиву.
+        Путь к корню загруженного датасета.
     """
-    raw_dir.mkdir(parents=True, exist_ok=True)
-    archive_path = raw_dir / _ARCHIVE_NAME
+    import kagglehub  # type: ignore[import]
 
-    if archive_path.exists():
-        logger.info(
-            "Архив уже существует, загрузка пропущена: %s", archive_path
-        )
-        return archive_path
-
-    logger.info("Загрузка PKLotSegmented с %s …", _PKLOT_URL)
-
-    # Пробуем wget (более быстрый прогресс в Colab), при недоступности — urllib.
-    wget_available = shutil.which("wget") is not None
-    if wget_available:
-        result = subprocess.run(
-            [
-                "wget",
-                "--no-verbose",
-                "--show-progress",
-                "-O",
-                str(archive_path),
-                _PKLOT_URL,
-            ],
-            check=False,
-        )
-        if result.returncode != 0:
-            logger.warning(
-                "wget завершился с кодом %d, переключаемся на urllib.",
-                result.returncode,
-            )
-            # Удаляем частично загруженный файл перед повторной попыткой.
-            if archive_path.exists():
-                archive_path.unlink()
-            urllib.request.urlretrieve(_PKLOT_URL, str(archive_path))
-    else:
-        logger.info("wget недоступен, используем urllib.request.urlretrieve …")
-        urllib.request.urlretrieve(_PKLOT_URL, str(archive_path))
-
-    logger.info(
-        "Загрузка завершена: %s (%.1f МБ)",
-        archive_path,
-        archive_path.stat().st_size / (1024 ** 2),
-    )
-    return archive_path
-
-
-def _extract_archive(archive_path: Path, raw_dir: Path) -> Path:
-    """
-    Распаковывает архив PKLotSegmented в директорию ``raw_dir``.
-
-    Если директория ``PKLotSegmented`` уже существует, распаковка
-    пропускается для экономии времени.
-
-    Параметры
-    ----------
-    archive_path:
-        Путь к файлу ``PKLotSegmented.tar.gz``.
-    raw_dir:
-        Директория, в которую будет произведена распаковка.
-
-    Возвращает
-    ----------
-    Path
-        Путь к корню распакованного датасета (``raw_dir/PKLotSegmented``).
-    """
-    extracted_root = raw_dir / _EXTRACTED_DIR_NAME
-
-    if extracted_root.exists():
-        logger.info(
-            "Директория уже существует, распаковка пропущена: %s", extracted_root
-        )
-        return extracted_root
-
-    logger.info("Распаковка архива %s …", archive_path)
-    with tarfile.open(str(archive_path), "r:gz") as tar:
-        tar.extractall(path=str(raw_dir))
-
-    logger.info("Распаковка завершена: %s", extracted_root)
-    return extracted_root
+    logger.info("Загрузка датасета '%s' с Kaggle …", dataset_id)
+    path = kagglehub.dataset_download(dataset_id)
+    logger.info("Датасет загружен: %s", path)
+    return Path(path)
 
 
 def _collect_all_images(
@@ -542,23 +460,20 @@ def _count_existing_dataset(data_dir: Path) -> DatasetInfo:
 
 def download_and_prepare_dataset(data_dir: Path, seed: int = 42) -> Path:
     """
-    Загружает датасет PKLot напрямую с сайта UFPR и организует его в структуру
+    Загружает датасет PKLot с Kaggle и организует его в структуру
     директорий, совместимую с ImageFolder.
 
     Последовательность шагов
     ------------------------
     1. Проверка наличия уже подготовленной структуры (быстрый выход).
-    2. Загрузка архива ``PKLotSegmented.tar.gz`` с ``http://www.inf.ufpr.br``.
-       Если файл уже скачан — загрузка пропускается.
-    3. Распаковка архива в поддиректорию ``raw/`` внутри ``data_dir``.
-    4. Обход дерева распакованных файлов и сбор всех изображений со всех
+    2. Загрузка датасета с Kaggle через kagglehub.
+    3. Обход дерева файлов и сбор всех изображений со всех
        парковок (PUCPR, UFPR04, UFPR05).
-    5. Стратифицированное случайное разбиение 70 / 15 / 15 по метке класса.
+    4. Стратифицированное случайное разбиение 70 / 15 / 15 по метке класса.
        **Все три парковки присутствуют в каждом разбиении.**
-    6. Копирование изображений в дерево ImageFolder.
-    7. Логирование статистики по разбиениям, классам и парковкам.
-    8. Запись файла-сторожа.
-    9. Удаление сырых файлов для экономии места на диске (Colab).
+    5. Копирование изображений в дерево ImageFolder.
+    6. Логирование статистики по разбиениям, классам и парковкам.
+    7. Запись файла-сторожа.
 
     Параметры
     ----------
@@ -595,21 +510,20 @@ def download_and_prepare_dataset(data_dir: Path, seed: int = 42) -> Path:
 
     logger.info("Начало подготовки датасета PKLot в '%s'.", data_dir)
 
-    # Рабочая директория для сырых загрузок и распакованных файлов.
-    raw_dir = data_dir / "raw"
+    # ------------------------------------------------------------------
+    # Шаг 1: Загрузка датасета с Kaggle
+    # ------------------------------------------------------------------
+    kaggle_path = _download_kaggle(_KAGGLE_DATASET)
+
+    # Ищем корень PKLotSegmented внутри загруженной директории.
+    extracted_root = kaggle_path
+    for candidate in [kaggle_path / "PKLotSegmented", kaggle_path]:
+        if any(candidate.iterdir()):
+            extracted_root = candidate
+            break
 
     # ------------------------------------------------------------------
-    # Шаг 1: Загрузка архива
-    # ------------------------------------------------------------------
-    archive_path = _download_archive(raw_dir)
-
-    # ------------------------------------------------------------------
-    # Шаг 2: Распаковка архива
-    # ------------------------------------------------------------------
-    extracted_root = _extract_archive(archive_path, raw_dir)
-
-    # ------------------------------------------------------------------
-    # Шаг 3: Сбор всех изображений со всех парковок
+    # Шаг 2: Сбор всех изображений со всех парковок
     # ------------------------------------------------------------------
     all_records = _collect_all_images(extracted_root)
 
@@ -620,7 +534,7 @@ def download_and_prepare_dataset(data_dir: Path, seed: int = 42) -> Path:
         )
 
     # ------------------------------------------------------------------
-    # Шаг 4: Стратифицированное разбиение 70 / 15 / 15
+    # Шаг 3: Стратифицированное разбиение 70 / 15 / 15
     # ------------------------------------------------------------------
     logger.info(
         "Применяется стратифицированное разбиение 70/15/15 "
@@ -631,25 +545,25 @@ def download_and_prepare_dataset(data_dir: Path, seed: int = 42) -> Path:
     split_records = _split_samples_randomly(all_records, seed=seed)
 
     # ------------------------------------------------------------------
-    # Шаг 5: Создание дерева директорий ImageFolder
+    # Шаг 4: Создание дерева директорий ImageFolder
     # ------------------------------------------------------------------
     _build_empty_imagefolder_tree(data_dir)
 
     # ------------------------------------------------------------------
-    # Шаг 6: Копирование изображений
+    # Шаг 5: Копирование изображений
     # ------------------------------------------------------------------
     logger.info("Копирование изображений в структуру ImageFolder …")
     info = _copy_images(split_records, data_dir)
 
     # ------------------------------------------------------------------
-    # Шаг 7: Детальное логирование распределения по парковкам
+    # Шаг 6: Детальное логирование распределения по парковкам
     # ------------------------------------------------------------------
     logger.info("Распределение изображений по парковкам в каждом разбиении:")
     _log_parking_lot_distribution(split_records)
     info.log_summary()
 
     # ------------------------------------------------------------------
-    # Шаг 8: Запись файла-сторожа
+    # Шаг 7: Запись файла-сторожа
     # ------------------------------------------------------------------
     _sentinel_path(data_dir).write_text(
         f"PKLot prepared: train={info.num_train}, val={info.num_val}, test={info.num_test}\n",
@@ -659,18 +573,6 @@ def download_and_prepare_dataset(data_dir: Path, seed: int = 42) -> Path:
         "Подготовка завершена. Файл-сторож записан в '%s'.",
         _sentinel_path(data_dir),
     )
-
-    # ------------------------------------------------------------------
-    # Шаг 9: Очистка сырых файлов для экономии места на диске
-    # ------------------------------------------------------------------
-    logger.info("Удаление сырых файлов для экономии места на диске …")
-    try:
-        shutil.rmtree(str(raw_dir))
-        logger.info("Директория '%s' удалена.", raw_dir)
-    except OSError as exc:
-        logger.warning(
-            "Не удалось удалить директорию '%s': %s", raw_dir, exc
-        )
 
     return data_dir
 
