@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude / AI
+.claude/
+.superpowers/
+claude.md
+CLAUDE.md
+edit.md
+docs/superpowers/
+
+# Data and models (too large for git)
+project/data/
+project/saved_models/*.pth
+project/models/
+project/__pycache__/
+project/plots/
+project/results/
