@@ -25,9 +25,8 @@ edit.md
 docs/superpowers/
 
 # Data and models (too large for git)
-project/data/
-project/saved_models/*.pth
-project/models/
-project/__pycache__/
-project/plots/
-project/results/
+data/
+saved_models/*.pth
+models/
+plots/
+results/
