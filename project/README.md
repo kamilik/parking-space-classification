@@ -6,6 +6,8 @@
 ![License](https://img.shields.io/badge/License-MIT-green)
 ![Task](https://img.shields.io/badge/Task-Binary%20Classification-purple)
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/kamilik/parking-space-classification/blob/main/project/notebook.ipynb)
+
 ## Описание проекта
 
 Данный проект реализует систему автоматического определения занятости парковочного места по фотографии с использованием глубокого обучения. На вход системы подаётся изображение одного парковочного места, на выходе — бинарная классификация:
