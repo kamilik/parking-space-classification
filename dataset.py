@@ -4,9 +4,10 @@ dataset.py — Загрузка, подготовка датасета PKLot и 
 Этот модуль обрабатывает все этапы подготовки данных для классификатора
 занятости парковочных мест:
 
-1. Загрузка датасета PKLot через FiftyOne Model Zoo.
-2. Преобразование датасета FiftyOne в структуру директорий
-   ``torchvision.datasets.ImageFolder``::
+1. Загрузка архива PKLotSegmented напрямую с сайта UFPR.
+2. Разбиение всех изображений (со всех парковок: PUCPR, UFPR04, UFPR05)
+   на train / val / test в соотношении 70 / 15 / 15 со стратификацией.
+3. Копирование в структуру директорий ``torchvision.datasets.ImageFolder``::
 
        data_dir/
            train/
@@ -19,7 +20,7 @@ dataset.py — Загрузка, подготовка датасета PKLot и 
                Empty/
                Occupied/
 
-3. Создание экземпляров PyTorch ``DataLoader``, готовых для обучения.
+4. Создание экземпляров PyTorch ``DataLoader``, готовых для обучения.
 
 Публичное API
 -------------
@@ -43,6 +44,9 @@ from __future__ import annotations
 
 import logging
 import shutil
+import subprocess
+import tarfile
+import urllib.request
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -61,11 +65,24 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Константы
 # ---------------------------------------------------------------------------
-_FIFTYONE_DATASET_NAME: str = "Voxel51/PKLot"
+
+# URL архива PKLot с предварительно нарезанными изображениями парковочных мест.
+_PKLOT_URL: str = "http://www.inf.ufpr.br/lesoliveira/PKLot/PKLotSegmented.tar.gz"
+
+# Имя архива и корневой директории после распаковки.
+_ARCHIVE_NAME: str = "PKLotSegmented.tar.gz"
+_EXTRACTED_DIR_NAME: str = "PKLotSegmented"
+
+# Известные парковки внутри датасета.
+_PARKING_LOTS: tuple[str, ...] = ("PUCPR", "UFPR04", "UFPR05")
+
+# Допустимые расширения изображений (строчные).
+_IMAGE_EXTENSIONS: frozenset[str] = frozenset({".jpg", ".jpeg", ".png"})
+
 _SPLIT_NAMES: tuple[str, ...] = ("train", "val", "test")
 _CLASS_NAMES: tuple[str, ...] = ("Empty", "Occupied")
 
-# Соотношения разбиений при отсутствии предопределённых разбиений в датасете.
+# Соотношения разбиений.
 _TRAIN_RATIO: float = 0.70
 _VAL_RATIO: float = 0.15
 # Доля теста = 1 - _TRAIN_RATIO - _VAL_RATIO = 0.15  (вычисляется автоматически)
@@ -107,7 +124,7 @@ class DatasetInfo:
 
     def log_summary(self) -> None:
         """Записывает читаемую сводку в логгер модуля."""
-        logger.info("Dataset summary — total images: %d", self.total)
+        logger.info("Сводка датасета — всего изображений: %d", self.total)
         logger.info(
             "  train=%d | val=%d | test=%d",
             self.num_train,
@@ -157,138 +174,207 @@ def _build_empty_imagefolder_tree(data_dir: Path) -> None:
         for cls in _CLASS_NAMES:
             target = data_dir / split / cls
             target.mkdir(parents=True, exist_ok=True)
-            logger.debug("Directory ready: %s", target)
+            logger.debug("Директория готова: %s", target)
 
 
-def _label_to_class(label: str) -> str | None:
+def _download_archive(raw_dir: Path) -> Path:
     """
-    Приводит метку разметки FiftyOne к одному из двух канонических имён
-    классов, используемых в проекте.
+    Загружает архив PKLotSegmented с сайта UFPR в директорию ``raw_dir``.
 
-    Датасет PKLot использует ``"empty"`` / ``"occupied"`` (строчные) в
-    некоторых версиях и ``"Empty"`` / ``"Occupied"`` (с заглавной) в
-    других. Эта функция принимает оба варианта без учёта регистра.
-
-    Возвращает ``None`` для любой нераспознанной метки, чтобы вызывающий
-    код мог пропустить такой образец.
-    """
-    mapping: dict[str, str] = {
-        "empty": "Empty",
-        "occupied": "Occupied",
-    }
-    return mapping.get(label.strip().lower())
-
-
-def _collect_samples_from_fiftyone(
-    fo_dataset: Any,
-) -> list[tuple[Path, str]]:
-    """
-    Итерирует FiftyOne датасет и возвращает пары ``(путь_к_изображению, имя_класса)``
-    для каждого образца с допустимой меткой разметки.
+    Если архив уже существует, загрузка пропускается.
 
     Параметры
     ----------
-    fo_dataset:
-        Экземпляр ``fiftyone.core.dataset.Dataset``.
+    raw_dir:
+        Директория для хранения загруженных файлов.
 
     Возвращает
     ----------
-    list of (filepath, class_name)
-        Отфильтрованный список — образцы без распознанной метки ``ground_truth``
-        пропускаются с предупреждением.
+    Path
+        Путь к скачанному (или уже существующему) архиву.
     """
-    samples: list[tuple[Path, str]] = []
-    skipped: int = 0
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    archive_path = raw_dir / _ARCHIVE_NAME
 
-    for sample in fo_dataset:
-        gt = sample.get_field("ground_truth")
-        if gt is None:
-            skipped += 1
-            continue
-        label: str | None = _label_to_class(gt.label)
-        if label is None:
-            logger.warning("Unrecognised label '%s' — skipping sample.", gt.label)
-            skipped += 1
-            continue
-        samples.append((Path(sample.filepath), label))
+    if archive_path.exists():
+        logger.info(
+            "Архив уже существует, загрузка пропущена: %s", archive_path
+        )
+        return archive_path
+
+    logger.info("Загрузка PKLotSegmented с %s …", _PKLOT_URL)
+
+    # Пробуем wget (более быстрый прогресс в Colab), при недоступности — urllib.
+    wget_available = shutil.which("wget") is not None
+    if wget_available:
+        result = subprocess.run(
+            [
+                "wget",
+                "--no-verbose",
+                "--show-progress",
+                "-O",
+                str(archive_path),
+                _PKLOT_URL,
+            ],
+            check=False,
+        )
+        if result.returncode != 0:
+            logger.warning(
+                "wget завершился с кодом %d, переключаемся на urllib.",
+                result.returncode,
+            )
+            # Удаляем частично загруженный файл перед повторной попыткой.
+            if archive_path.exists():
+                archive_path.unlink()
+            urllib.request.urlretrieve(_PKLOT_URL, str(archive_path))
+    else:
+        logger.info("wget недоступен, используем urllib.request.urlretrieve …")
+        urllib.request.urlretrieve(_PKLOT_URL, str(archive_path))
 
     logger.info(
-        "FiftyOne samples collected: %d valid, %d skipped.",
-        len(samples),
-        skipped,
+        "Загрузка завершена: %s (%.1f МБ)",
+        archive_path,
+        archive_path.stat().st_size / (1024 ** 2),
     )
-    return samples
+    return archive_path
 
 
-def _collect_samples_by_split_from_fiftyone(
-    fo_dataset: Any,
-) -> dict[str, list[tuple[Path, str]]]:
+def _extract_archive(archive_path: Path, raw_dir: Path) -> Path:
     """
-    Собирает образцы из датасета FiftyOne и группирует их по тегу разбиения.
+    Распаковывает архив PKLotSegmented в директорию ``raw_dir``.
 
-    Каждый образец FiftyOne может иметь ``"train"``, ``"validation"``
-    (преобразуется в ``"val"``) или ``"test"`` в списке тегов ``tags``.
-    Образцы без тегов помещаются в группу ``"untagged"``, чтобы вызывающий
-    код мог перейти к случайному разбиению.
+    Если директория ``PKLotSegmented`` уже существует, распаковка
+    пропускается для экономии времени.
+
+    Параметры
+    ----------
+    archive_path:
+        Путь к файлу ``PKLotSegmented.tar.gz``.
+    raw_dir:
+        Директория, в которую будет произведена распаковка.
 
     Возвращает
     ----------
-    dict, отображающий имя разбиения в список (filepath, class_name)
-        Ключи: ``"train"``, ``"val"``, ``"test"`` и/или ``"untagged"``.
+    Path
+        Путь к корню распакованного датасета (``raw_dir/PKLotSegmented``).
     """
-    tag_to_split: dict[str, str] = {
-        "train": "train",
-        "validation": "val",
-        "val": "val",
-        "test": "test",
-    }
-    buckets: dict[str, list[tuple[Path, str]]] = defaultdict(list)
-    skipped: int = 0
+    extracted_root = raw_dir / _EXTRACTED_DIR_NAME
 
-    for sample in fo_dataset:
-        gt = sample.get_field("ground_truth")
-        if gt is None:
-            skipped += 1
+    if extracted_root.exists():
+        logger.info(
+            "Директория уже существует, распаковка пропущена: %s", extracted_root
+        )
+        return extracted_root
+
+    logger.info("Распаковка архива %s …", archive_path)
+    with tarfile.open(str(archive_path), "r:gz") as tar:
+        tar.extractall(path=str(raw_dir))
+
+    logger.info("Распаковка завершена: %s", extracted_root)
+    return extracted_root
+
+
+def _collect_all_images(
+    extracted_root: Path,
+) -> list[tuple[Path, str, str]]:
+    """
+    Обходит дерево директорий PKLotSegmented и собирает все изображения.
+
+    Ожидаемая структура::
+
+        PKLotSegmented/
+            {parking_lot}/{weather}/{date}/Empty/*.jpg
+            {parking_lot}/{weather}/{date}/Occupied/*.jpg
+
+    Параметры
+    ----------
+    extracted_root:
+        Корень распакованного архива PKLotSegmented.
+
+    Возвращает
+    ----------
+    list of (src_path, class_name, unique_filename)
+        ``class_name`` — ``"Empty"`` или ``"Occupied"``.
+        ``unique_filename`` — уникальное имя файла вида
+        ``{parking_lot}_{weather}_{date}_{original_name}``
+        для предотвращения коллизий при копировании.
+    """
+    records: list[tuple[Path, str, str]] = []
+    # Счётчик изображений по парковкам для логирования.
+    lot_counts: dict[str, int] = defaultdict(int)
+
+    for img_path in sorted(extracted_root.rglob("*")):
+        # Фильтруем только файлы с допустимыми расширениями.
+        if not img_path.is_file():
             continue
-        label: str | None = _label_to_class(gt.label)
-        if label is None:
-            logger.warning("Unrecognised label '%s' — skipping sample.", gt.label)
-            skipped += 1
+        if img_path.suffix.lower() not in _IMAGE_EXTENSIONS:
             continue
 
-        filepath = Path(sample.filepath)
-        tags: list[str] = list(sample.tags) if sample.tags else []
+        # Ожидаемые части пути (относительно extracted_root):
+        #   parts[-1] = filename
+        #   parts[-2] = Empty | Occupied  (имя класса)
+        #   parts[-3] = дата (например, 2012-09-12)
+        #   parts[-4] = Cloudy | Rainy | Sunny  (погода)
+        #   parts[-5] = PUCPR | UFPR04 | UFPR05  (парковка)
+        try:
+            rel_parts = img_path.relative_to(extracted_root).parts
+        except ValueError:
+            logger.warning("Не удалось вычислить относительный путь: %s", img_path)
+            continue
 
-        assigned_split: str = "untagged"
-        for tag in tags:
-            if tag.lower() in tag_to_split:
-                assigned_split = tag_to_split[tag.lower()]
-                break
+        if len(rel_parts) < 5:
+            logger.debug("Нестандартная глубина пути, пропускаем: %s", img_path)
+            continue
 
-        buckets[assigned_split].append((filepath, label))
+        parking_lot = rel_parts[0]
+        weather = rel_parts[1]
+        date_str = rel_parts[2]
+        class_folder = rel_parts[3]
+        original_name = rel_parts[4]
+
+        # Нормализуем имя класса: принимаем Empty / empty / Occupied / occupied.
+        class_lower = class_folder.strip().lower()
+        if class_lower == "empty":
+            class_name = "Empty"
+        elif class_lower == "occupied":
+            class_name = "Occupied"
+        else:
+            logger.debug(
+                "Неизвестный класс '%s', пропускаем: %s", class_folder, img_path
+            )
+            continue
+
+        # Уникальное имя файла для предотвращения коллизий между парковками.
+        unique_filename = f"{parking_lot}_{weather}_{date_str}_{original_name}"
+
+        records.append((img_path, class_name, unique_filename))
+        lot_counts[parking_lot] += 1
 
     logger.info(
-        "Sample distribution by tag: %s | skipped=%d",
-        {k: len(v) for k, v in buckets.items()},
-        skipped,
+        "Всего собрано изображений: %d. По парковкам: %s",
+        len(records),
+        dict(lot_counts),
     )
-    return dict(buckets)
+    return records
 
 
 def _split_samples_randomly(
-    samples: list[tuple[Path, str]],
+    records: list[tuple[Path, str, str]],
     seed: int,
-) -> dict[str, list[tuple[Path, str]]]:
+) -> dict[str, list[tuple[Path, str, str]]]:
     """
     Стратифицированное случайное разбиение на train / val / test.
+
+    Все изображения из ВСЕХ парковок смешиваются перед разбиением,
+    чтобы каждое разбиение содержало данные от каждой парковки.
 
     Использует ``sklearn.model_selection.train_test_split`` со ``stratify``
     для сохранения соотношения классов во всех трёх разбиениях.
 
     Параметры
     ----------
-    samples:
-        Полный список пар ``(filepath, class_name)``.
+    records:
+        Полный список кортежей ``(filepath, class_name, unique_filename)``.
     seed:
         Случайное зерно для воспроизводимости.
 
@@ -296,57 +382,85 @@ def _split_samples_randomly(
     ----------
     dict с ключами ``"train"``, ``"val"``, ``"test"``.
     """
-    labels = [cls for _, cls in samples]
+    labels = [cls for _, cls, _ in records]
 
     # Первое разбиение: train vs. (val + test)
-    train_samples, remaining_samples = train_test_split(
-        samples,
+    train_records, remaining_records = train_test_split(
+        records,
         test_size=1.0 - _TRAIN_RATIO,
         stratify=labels,
         random_state=seed,
     )
 
     # Второе разбиение: val vs. test (равные половины оставшейся части)
-    remaining_labels = [cls for _, cls in remaining_samples]
-    val_samples, test_samples = train_test_split(
-        remaining_samples,
+    remaining_labels = [cls for _, cls, _ in remaining_records]
+    val_records, test_records = train_test_split(
+        remaining_records,
         test_size=0.5,  # 50% от оставшихся 30% = 15% общего объёма
         stratify=remaining_labels,
         random_state=seed,
     )
 
     logger.info(
-        "Random split — train=%d | val=%d | test=%d",
-        len(train_samples),
-        len(val_samples),
-        len(test_samples),
+        "Стратифицированное разбиение — train=%d | val=%d | test=%d",
+        len(train_records),
+        len(val_records),
+        len(test_records),
     )
     return {
-        "train": train_samples,
-        "val": val_samples,
-        "test": test_samples,
+        "train": train_records,
+        "val": val_records,
+        "test": test_records,
     }
 
 
+def _log_parking_lot_distribution(
+    split_records: dict[str, list[tuple[Path, str, str]]],
+) -> None:
+    """
+    Выводит в лог количество изображений от каждой парковки в каждом разбиении.
+
+    Параметры
+    ----------
+    split_records:
+        Отображение имени разбиения в список кортежей
+        ``(filepath, class_name, unique_filename)``.
+    """
+    for split, records in split_records.items():
+        lot_cls_counts: dict[str, dict[str, int]] = defaultdict(
+            lambda: defaultdict(int)
+        )
+        for src_path, class_name, _ in records:
+            # Имя парковки — первая часть относительного пути.
+            # unique_filename имеет вид {lot}_{weather}_{date}_{orig}.
+            # Восстанавливаем имя парковки из уникального имени файла.
+            lot_name = src_path.parts[-5] if len(src_path.parts) >= 5 else "unknown"
+            lot_cls_counts[lot_name][class_name] += 1
+
+        for lot, cls_counts in sorted(lot_cls_counts.items()):
+            parts = ", ".join(
+                f"{cls}={cnt}" for cls, cnt in sorted(cls_counts.items())
+            )
+            logger.info("  [%s] %s: %s", split, lot, parts)
+
+
 def _copy_images(
-    split_data: dict[str, list[tuple[Path, str]]],
+    split_records: dict[str, list[tuple[Path, str, str]]],
     data_dir: Path,
 ) -> DatasetInfo:
     """
     Копирует изображения в дерево ImageFolder и возвращает статистику датасета.
 
-    Для каждой пары ``(src_path, class_name)`` в ``split_data`` исходное
-    изображение копируется (через ``shutil.copy2``) по пути::
+    Для каждого кортежа ``(src_path, class_name, unique_filename)``
+    исходное изображение копируется (через ``shutil.copy2``) по пути::
 
-        data_dir/{разбиение}/{class_name}/{оригинальное_имя_файла}
-
-    Дублирующиеся имена файлов в паре разбиение/класс различаются
-    добавлением нуль-заполненного индекса.
+        data_dir/{разбиение}/{class_name}/{unique_filename}
 
     Параметры
     ----------
-    split_data:
-        Отображение имени разбиения в список пар ``(filepath, class_name)``.
+    split_records:
+        Отображение имени разбиения в список кортежей
+        ``(filepath, class_name, unique_filename)``.
     data_dir:
         Корень дерева ImageFolder (уже созданного функцией
         ``_build_empty_imagefolder_tree``).
@@ -363,25 +477,12 @@ def _copy_images(
     }
 
     for split in _SPLIT_NAMES:
-        samples = split_data.get(split, [])
-        # Отслеживаем уже встреченные имена файлов в данной директории (разбиение, класс),
-        # чтобы избежать молчаливой перезаписи при совпадении имён из разных источников.
-        seen: dict[tuple[str, str], int] = {}
+        records = split_records.get(split, [])
 
-        for src_path, class_name in samples:
+        for src_path, class_name, unique_filename in records:
             dst_dir = data_dir / split / class_name
-            filename = src_path.name
-            # Ключ включает class_name и filename для ограничения дубликатов в пределах класса.
-            key = (class_name, filename)
-            if key in seen:
-                seen[key] += 1
-                stem = src_path.stem
-                suffix = src_path.suffix
-                filename = f"{stem}_{seen[key]:05d}{suffix}"
-            else:
-                seen[key] = 0
+            dst_path = dst_dir / unique_filename
 
-            dst_path = dst_dir / filename
             if not dst_path.exists():
                 shutil.copy2(src_path, dst_path)
 
@@ -389,7 +490,7 @@ def _copy_images(
             distribution[split][class_name] += 1
 
         logger.info(
-            "Split '%s' — %d images copied (%s).",
+            "Разбиение '%s' — скопировано %d изображений (%s).",
             split,
             counts[split],
             ", ".join(
@@ -441,13 +542,23 @@ def _count_existing_dataset(data_dir: Path) -> DatasetInfo:
 
 def download_and_prepare_dataset(data_dir: Path, seed: int = 42) -> Path:
     """
-    Загружает датасет PKLot через FiftyOne и организует его в структуру
+    Загружает датасет PKLot напрямую с сайта UFPR и организует его в структуру
     директорий, совместимую с ImageFolder.
 
-    Эта функция является **идемпотентной**: если целевая директория уже
-    содержит ожидаемую структуру разбиений/классов (определяется через
-    файл-сторож), функция пропускает шаги загрузки и копирования и
-    немедленно возвращает управление.
+    Последовательность шагов
+    ------------------------
+    1. Проверка наличия уже подготовленной структуры (быстрый выход).
+    2. Загрузка архива ``PKLotSegmented.tar.gz`` с ``http://www.inf.ufpr.br``.
+       Если файл уже скачан — загрузка пропускается.
+    3. Распаковка архива в поддиректорию ``raw/`` внутри ``data_dir``.
+    4. Обход дерева распакованных файлов и сбор всех изображений со всех
+       парковок (PUCPR, UFPR04, UFPR05).
+    5. Стратифицированное случайное разбиение 70 / 15 / 15 по метке класса.
+       **Все три парковки присутствуют в каждом разбиении.**
+    6. Копирование изображений в дерево ImageFolder.
+    7. Логирование статистики по разбиениям, классам и парковкам.
+    8. Запись файла-сторожа.
+    9. Удаление сырых файлов для экономии места на диске (Colab).
 
     Параметры
     ----------
@@ -465,17 +576,8 @@ def download_and_prepare_dataset(data_dir: Path, seed: int = 42) -> Path:
     Исключения
     ----------
     RuntimeError
-        Если загрузка FiftyOne прошла успешно, но в датасете не найдено
-        допустимых образцов.
-
-    Примечания
-    ----------
-    * Изображения **копируются** (не создаются символические ссылки) для
-      совместимости с Colab и кросс-платформенного использования.
-    * Датасет PKLot в FiftyOne может иметь теги ``"train"``, ``"validation"``
-      и ``"test"`` на образцах. При наличии этих тегов они используются
-      напрямую. При их отсутствии (или при покрытии менее двух разбиений)
-      применяется стратифицированное случайное разбиение 70 / 15 / 15.
+        Если после загрузки и распаковки не найдено ни одного допустимого
+        изображения.
     """
     data_dir = Path(data_dir)
 
@@ -484,107 +586,91 @@ def download_and_prepare_dataset(data_dir: Path, seed: int = 42) -> Path:
     # ------------------------------------------------------------------
     if _is_already_prepared(data_dir):
         logger.info(
-            "ImageFolder structure already exists at '%s' — skipping preparation.",
+            "Структура ImageFolder уже существует в '%s' — подготовка пропущена.",
             data_dir,
         )
         info = _count_existing_dataset(data_dir)
         info.log_summary()
         return data_dir
 
-    logger.info("Starting PKLot dataset preparation in '%s'.", data_dir)
+    logger.info("Начало подготовки датасета PKLot в '%s'.", data_dir)
+
+    # Рабочая директория для сырых загрузок и распакованных файлов.
+    raw_dir = data_dir / "raw"
 
     # ------------------------------------------------------------------
-    # Шаг 1: Загрузка через FiftyOne
+    # Шаг 1: Загрузка архива
     # ------------------------------------------------------------------
-    try:
-        import fiftyone.zoo as foz  # type: ignore[import]
-    except ImportError as exc:
-        raise ImportError(
-            "fiftyone is not installed.  Run: pip install fiftyone"
-        ) from exc
+    archive_path = _download_archive(raw_dir)
 
-    logger.info("Downloading '%s' from FiftyOne Zoo …", _FIFTYONE_DATASET_NAME)
-    fo_dataset = foz.load_zoo_dataset(_FIFTYONE_DATASET_NAME)
+    # ------------------------------------------------------------------
+    # Шаг 2: Распаковка архива
+    # ------------------------------------------------------------------
+    extracted_root = _extract_archive(archive_path, raw_dir)
+
+    # ------------------------------------------------------------------
+    # Шаг 3: Сбор всех изображений со всех парковок
+    # ------------------------------------------------------------------
+    all_records = _collect_all_images(extracted_root)
+
+    if not all_records:
+        raise RuntimeError(
+            "Не найдено ни одного изображения в распакованном архиве PKLotSegmented. "
+            "Проверьте корректность загрузки и структуру архива."
+        )
+
+    # ------------------------------------------------------------------
+    # Шаг 4: Стратифицированное разбиение 70 / 15 / 15
+    # ------------------------------------------------------------------
     logger.info(
-        "FiftyOne dataset loaded: %d total samples.", len(fo_dataset)
+        "Применяется стратифицированное разбиение 70/15/15 "
+        "(%d изображений, seed=%d).",
+        len(all_records),
+        seed,
     )
+    split_records = _split_samples_randomly(all_records, seed=seed)
 
     # ------------------------------------------------------------------
-    # Шаг 2: Сбор образцов с учётом существующих тегов разбиений
-    # ------------------------------------------------------------------
-    buckets = _collect_samples_by_split_from_fiftyone(fo_dataset)
-
-    # Определяем, содержит ли датасет пригодные теги разбиений.
-    tagged_splits = {
-        k: v for k, v in buckets.items() if k in ("train", "val", "test") and v
-    }
-    untagged_samples = buckets.get("untagged", [])
-
-    has_predefined_splits = len(tagged_splits) >= 2  # минимум train + ещё одно
-
-    if has_predefined_splits and not untagged_samples:
-        # Все образцы имеют теги разбиений — используем их напрямую.
-        logger.info(
-            "Using pre-defined dataset splits: %s",
-            {k: len(v) for k, v in tagged_splits.items()},
-        )
-        split_data: dict[str, list[tuple[Path, str]]] = dict(tagged_splits)
-
-        # Гарантируем наличие каждого ожидаемого разбиения (даже пустого).
-        for split in _SPLIT_NAMES:
-            split_data.setdefault(split, [])
-
-    elif has_predefined_splits and untagged_samples:
-        # Часть образцов имеет теги, часть нет. Объединяем теговые разбиения
-        # и применяем стратифицированное разбиение к нетеговой части.
-        logger.info(
-            "Mixed tagging: %d tagged samples, %d untagged — "
-            "splitting untagged portion %d/%d/%d.",
-            sum(len(v) for v in tagged_splits.values()),
-            len(untagged_samples),
-            int(_TRAIN_RATIO * 100),
-            int(_VAL_RATIO * 100),
-            int((1.0 - _TRAIN_RATIO - _VAL_RATIO) * 100),
-        )
-        extra_splits = _split_samples_randomly(untagged_samples, seed=seed)
-        split_data = {
-            "train": tagged_splits.get("train", []) + extra_splits["train"],
-            "val": tagged_splits.get("val", []) + extra_splits["val"],
-            "test": tagged_splits.get("test", []) + extra_splits["test"],
-        }
-
-    else:
-        # Нет пригодных тегов разбиений — собираем всё и разбиваем случайно.
-        all_samples = _collect_samples_from_fiftyone(fo_dataset)
-        if not all_samples:
-            raise RuntimeError(
-                "No valid samples found in the PKLot FiftyOne dataset. "
-                "Check that the download completed successfully."
-            )
-        logger.info(
-            "No pre-defined splits detected — applying stratified 70/15/15 split."
-        )
-        split_data = _split_samples_randomly(all_samples, seed=seed)
-
-    # ------------------------------------------------------------------
-    # Шаг 3: Создание дерева директорий
+    # Шаг 5: Создание дерева директорий ImageFolder
     # ------------------------------------------------------------------
     _build_empty_imagefolder_tree(data_dir)
 
     # ------------------------------------------------------------------
-    # Шаг 4: Копирование изображений
+    # Шаг 6: Копирование изображений
     # ------------------------------------------------------------------
-    logger.info("Copying images into ImageFolder structure …")
-    info = _copy_images(split_data, data_dir)
+    logger.info("Копирование изображений в структуру ImageFolder …")
+    info = _copy_images(split_records, data_dir)
+
+    # ------------------------------------------------------------------
+    # Шаг 7: Детальное логирование распределения по парковкам
+    # ------------------------------------------------------------------
+    logger.info("Распределение изображений по парковкам в каждом разбиении:")
+    _log_parking_lot_distribution(split_records)
     info.log_summary()
 
     # ------------------------------------------------------------------
-    # Шаг 5: Запись файла-сторожа для пропуска при повторных запусках
+    # Шаг 8: Запись файла-сторожа
     # ------------------------------------------------------------------
     _sentinel_path(data_dir).write_text(
-        f"PKLot prepared: train={info.num_train}, val={info.num_val}, test={info.num_test}\n"
+        f"PKLot prepared: train={info.num_train}, val={info.num_val}, test={info.num_test}\n",
+        encoding="utf-8",
     )
-    logger.info("Preparation complete.  Sentinel written to '%s'.", _sentinel_path(data_dir))
+    logger.info(
+        "Подготовка завершена. Файл-сторож записан в '%s'.",
+        _sentinel_path(data_dir),
+    )
+
+    # ------------------------------------------------------------------
+    # Шаг 9: Очистка сырых файлов для экономии места на диске
+    # ------------------------------------------------------------------
+    logger.info("Удаление сырых файлов для экономии места на диске …")
+    try:
+        shutil.rmtree(str(raw_dir))
+        logger.info("Директория '%s' удалена.", raw_dir)
+    except OSError as exc:
+        logger.warning(
+            "Не удалось удалить директорию '%s': %s", raw_dir, exc
+        )
 
     return data_dir
 
@@ -649,7 +735,7 @@ def get_data_loaders(
         transform=train_transform,
     )
     logger.info(
-        "Training dataset: %d images | classes: %s",
+        "Обучающий датасет: %d изображений | классы: %s",
         len(train_dataset),
         train_dataset.classes,
     )
@@ -672,7 +758,7 @@ def get_data_loaders(
         transform=val_transform,
     )
     logger.info(
-        "Validation dataset: %d images | classes: %s",
+        "Валидационный датасет: %d изображений | классы: %s",
         len(val_dataset),
         val_dataset.classes,
     )
@@ -695,7 +781,7 @@ def get_data_loaders(
         transform=val_transform,
     )
     logger.info(
-        "Test dataset: %d images | classes: %s",
+        "Тестовый датасет: %d изображений | классы: %s",
         len(test_dataset),
         test_dataset.classes,
     )
@@ -710,7 +796,7 @@ def get_data_loaders(
     )
 
     logger.info(
-        "DataLoaders created — batch_size=%d | pin_memory=%s | num_workers=%d",
+        "DataLoader созданы — batch_size=%d | pin_memory=%s | num_workers=%d",
         batch_size,
         pin_memory,
         _NUM_WORKERS,
