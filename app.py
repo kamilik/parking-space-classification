@@ -335,11 +335,20 @@ def _discover_models() -> list[tuple[str, Path]]:
     if not SAVED_MODELS_DIR.exists():
         return []
 
+    # Чекпоинты сохраняются с «безопасным» именем (без "/" и "-"), например
+    # "EfficientNet-B0" → файл "EfficientNet_B0_best.pth". Восстанавливаем
+    # каноничное имя архитектуры, которое ожидает get_model().
+    safe_to_canonical: dict[str, str] = {
+        name.replace("/", "_").replace("-", "_"): name
+        for name in Config.MODEL_NAMES
+    }
+
     pairs: list[tuple[str, Path]] = []
     for pth_file in sorted(SAVED_MODELS_DIR.glob("*.pth")):
-        # Преобразуем имя файла в отображаемое имя, убирая суффиксы обучения.
-        stem = pth_file.stem  # например "ResNet18_best" или "EfficientNet-B0_best"
-        display_name = stem.replace("_best", "").replace("_checkpoint", "")
+        stem = pth_file.stem  # например "ResNet18_best" или "EfficientNet_B0_best"
+        key = stem.replace("_best", "").replace("_checkpoint", "")
+        # Каноничное имя, если файл соответствует известной архитектуре.
+        display_name = safe_to_canonical.get(key, key)
         pairs.append((display_name, pth_file))
     return pairs
 
