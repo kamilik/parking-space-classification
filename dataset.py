@@ -228,27 +228,29 @@ def _collect_all_images(
         if img_path.suffix.lower() not in _IMAGE_EXTENSIONS:
             continue
 
-        # Ожидаемые части пути (относительно extracted_root):
-        #   parts[-1] = filename
-        #   parts[-2] = Empty | Occupied  (имя класса)
-        #   parts[-3] = дата (например, 2012-09-12)
-        #   parts[-4] = Cloudy | Rainy | Sunny  (погода)
-        #   parts[-5] = PUCPR | UFPR04 | UFPR05  (парковка)
+        # Класс определяется по имени папки-родителя (Empty / Occupied),
+        # а не по фиксированной позиции в пути. Это устойчиво к любой глубине
+        # вложенности архива: неважно, лежит ли PKLotSegmented в корне
+        # загрузки или обёрнут в дополнительные каталоги.
         try:
             rel_parts = img_path.relative_to(extracted_root).parts
         except ValueError:
             logger.warning("Не удалось вычислить относительный путь: %s", img_path)
             continue
 
-        if len(rel_parts) < 5:
-            logger.debug("Нестандартная глубина пути, пропускаем: %s", img_path)
+        if len(rel_parts) < 2:
             continue
 
-        parking_lot = rel_parts[0]
-        weather = rel_parts[1]
-        date_str = rel_parts[2]
-        class_folder = rel_parts[3]
-        original_name = rel_parts[4]
+        class_folder = img_path.parent.name
+        original_name = img_path.name
+
+        # Контекст (до трёх папок над классом) — парковка / погода / дата
+        # в стандартной структуре PKLot; используется только для построения
+        # уникального имени файла.
+        context_parts = rel_parts[:-2][-3:]
+        parking_lot = context_parts[0] if context_parts else "PKLot"
+        weather = context_parts[1] if len(context_parts) > 1 else "NA"
+        date_str = context_parts[2] if len(context_parts) > 2 else "NA"
 
         # Нормализуем имя класса: принимаем Empty / empty / Occupied / occupied.
         class_lower = class_folder.strip().lower()
@@ -515,12 +517,11 @@ def download_and_prepare_dataset(data_dir: Path, seed: int = 42) -> Path:
     # ------------------------------------------------------------------
     kaggle_path = _download_kaggle(_KAGGLE_DATASET)
 
-    # Ищем корень PKLotSegmented внутри загруженной директории.
+    # Структура архива может отличаться, а папка PKLotSegmented бывает
+    # вложена на разную глубину. Поэтому обходим весь загруженный каталог —
+    # _collect_all_images определяет класс по имени папки Empty/Occupied
+    # независимо от глубины вложенности.
     extracted_root = kaggle_path
-    for candidate in [kaggle_path / "PKLotSegmented", kaggle_path]:
-        if any(candidate.iterdir()):
-            extracted_root = candidate
-            break
 
     # ------------------------------------------------------------------
     # Шаг 2: Сбор всех изображений со всех парковок
