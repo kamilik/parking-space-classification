@@ -43,6 +43,7 @@ dataset.py — Загрузка, подготовка датасета PKLot и 
 from __future__ import annotations
 
 import logging
+import random
 import shutil
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -278,6 +279,81 @@ def _collect_all_images(
     return records
 
 
+def _subsample_per_class(
+    records: list[tuple[Path, str, str]],
+    max_per_class: int | None,
+    seed: int,
+) -> list[tuple[Path, str, str]]:
+    """
+    Стратифицированная подвыборка: не более ``max_per_class`` изображений
+    каждого класса.
+
+    Полный PKLot содержит сотни тысяч изображений, поэтому для обучения за
+    приемлемое время берётся случайная подвыборка фиксированного размера на
+    класс. Сэмплирование детерминировано (зависит только от ``seed``), поэтому
+    результат воспроизводим между запусками.
+
+    Параметры
+    ----------
+    records:
+        Полный список кортежей ``(filepath, class_name, unique_filename)``.
+    max_per_class:
+        Максимум изображений на класс. ``None`` — вернуть все записи без изменений.
+    seed:
+        Случайное зерно для воспроизводимой подвыборки.
+
+    Возвращает
+    ----------
+    list[tuple[Path, str, str]]
+        Перемешанный список отобранных записей.
+    """
+    if not max_per_class:
+        logger.info(
+            "Подвыборка отключена (MAX_PER_CLASS=None) — используем все %d изображений.",
+            len(records),
+        )
+        return records
+
+    by_class: dict[str, list[tuple[Path, str, str]]] = defaultdict(list)
+    for rec in records:
+        by_class[rec[1]].append(rec)
+
+    rng = random.Random(seed)
+    sampled: list[tuple[Path, str, str]] = []
+
+    logger.info(
+        "Стратифицированная подвыборка: не более %d изображений на класс (seed=%d).",
+        max_per_class,
+        seed,
+    )
+    for cls in sorted(by_class):
+        items = by_class[cls]
+        if len(items) > max_per_class:
+            chosen = rng.sample(items, max_per_class)
+            logger.info(
+                "  класс '%s': %d → %d (случайная подвыборка)",
+                cls,
+                len(items),
+                len(chosen),
+            )
+        else:
+            chosen = items
+            logger.info(
+                "  класс '%s': %d (меньше лимита — берём все)",
+                cls,
+                len(items),
+            )
+        sampled.extend(chosen)
+
+    rng.shuffle(sampled)
+    logger.info(
+        "После подвыборки: %d изображений (было %d).",
+        len(sampled),
+        len(records),
+    )
+    return sampled
+
+
 def _split_samples_randomly(
     records: list[tuple[Path, str, str]],
     seed: int,
@@ -460,7 +536,11 @@ def _count_existing_dataset(data_dir: Path) -> DatasetInfo:
 # Публичное API
 # ---------------------------------------------------------------------------
 
-def download_and_prepare_dataset(data_dir: Path, seed: int = 42) -> Path:
+def download_and_prepare_dataset(
+    data_dir: Path,
+    seed: int = 42,
+    max_per_class: int | None = None,
+) -> Path:
     """
     Загружает датасет PKLot с Kaggle и организует его в структуру
     директорий, совместимую с ImageFolder.
@@ -537,6 +617,11 @@ def download_and_prepare_dataset(data_dir: Path, seed: int = 42) -> Path:
     # ------------------------------------------------------------------
     # Шаг 3: Стратифицированное разбиение 70 / 15 / 15
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Шаг 3a: Стратифицированная подвыборка (ограничение размера датасета)
+    # ------------------------------------------------------------------
+    all_records = _subsample_per_class(all_records, max_per_class, seed=seed)
+
     logger.info(
         "Применяется стратифицированное разбиение 70/15/15 "
         "(%d изображений, seed=%d).",

@@ -586,6 +586,207 @@ def train_model(
 
 
 # ---------------------------------------------------------------------------
+# Поячеечный (возобновляемый) конвейер: prepare_data / train_one / build_comparison
+# ---------------------------------------------------------------------------
+
+def _safe_name(model_name: str) -> str:
+    """Преобразует имя архитектуры в безопасное имя файла.
+
+    Пример: ``"ViT-B/16"`` → ``"ViT_B_16"``.
+    """
+    return model_name.replace("/", "_").replace("-", "_")
+
+
+def _metrics_path(config: type[Config], model_name: str) -> Path:
+    """Путь к JSON-файлу метрик конкретной модели."""
+    return config.RESULTS_DIR / f"{_safe_name(model_name)}_metrics.json"
+
+
+def prepare_data(config: type[Config] = Config) -> Path:
+    """Скачивает и подготавливает датасет PKLot с учётом ``config.MAX_PER_CLASS``.
+
+    Функция идемпотентна: при наличии готового дерева ImageFolder (файл-сторож)
+    повторное копирование не выполняется. Предназначена для запуска в отдельной
+    ячейке до обучения моделей.
+
+    Parameters
+    ----------
+    config:
+        Класс ``Config`` (не экземпляр) со всеми настройками проекта.
+
+    Returns
+    -------
+    Path
+        Корень подготовленного дерева ImageFolder (``config.DATA_DIR``).
+    """
+    seed_everything(config.SEED)
+    logger.info("=" * 70)
+    logger.info("ПОДГОТОВКА ДАННЫХ (MAX_PER_CLASS=%s)", config.MAX_PER_CLASS)
+    logger.info("=" * 70)
+    data_root: Path = download_and_prepare_dataset(
+        data_dir=config.DATA_DIR,
+        seed=config.SEED,
+        max_per_class=config.MAX_PER_CLASS,
+    )
+    logger.info("Датасет готов: %s", data_root)
+    return data_root
+
+
+def _build_loaders(
+    config: type[Config],
+) -> tuple[DataLoader, DataLoader, DataLoader]:
+    """Строит train/val/test ``DataLoader`` из подготовленного дерева."""
+    train_loader, val_loader, test_loader = get_data_loaders(
+        data_dir=config.DATA_DIR,
+        batch_size=config.BATCH_SIZE,
+        train_transform=get_train_transforms(),
+        val_transform=get_val_transforms(),
+    )
+    logger.info(
+        "DataLoaders готовы — train=%d | val=%d | test=%d батчей.",
+        len(train_loader),
+        len(val_loader),
+        len(test_loader),
+    )
+    return train_loader, val_loader, test_loader
+
+
+def train_one(
+    model_name: str,
+    config: type[Config] = Config,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Обучает ОДНУ архитектуру и сохраняет её результаты на диск.
+
+    Сохраняются:
+
+    * чекпоинт лучшей эпохи — ``saved_models/<модель>_best.pth`` (внутри
+      ``train_model`` через ``ModelCheckpoint``);
+    * графики (кривые обучения, матрица ошибок, ROC) — в ``config.RESULTS_DIR``;
+    * метрики модели — ``results/<модель>_metrics.json``.
+
+    Возобновляемость
+    ----------------
+    Если модель уже обучена (есть файл метрик И чекпоинт) и ``force=False`` —
+    обучение пропускается, метрики читаются с диска. Это позволяет держать
+    каждую модель в своей ячейке и безопасно перезапускать её после отключения
+    среды выполнения Colab, не теряя уже обученные модели.
+
+    Parameters
+    ----------
+    model_name:
+        Каноническое имя из ``config.MODEL_NAMES`` (например, ``"ResNet18"``).
+    config:
+        Класс ``Config`` (не экземпляр).
+    force:
+        Если ``True`` — переобучить, даже если результаты уже существуют.
+
+    Returns
+    -------
+    dict[str, Any]
+        Словарь метрик обученной модели.
+    """
+    seed_everything(config.SEED)
+    config.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    mpath: Path = _metrics_path(config, model_name)
+    ckpt: Path = config.SAVED_MODELS_DIR / f"{_safe_name(model_name)}_best.pth"
+
+    if not force and mpath.exists() and ckpt.exists():
+        logger.info(
+            "Модель '%s' уже обучена — пропускаю (force=True для переобучения). "
+            "Метрики: %s",
+            model_name,
+            mpath,
+        )
+        return json.loads(mpath.read_text(encoding="utf-8"))
+
+    logger.info("=" * 70)
+    logger.info("ОБУЧЕНИЕ: %s", model_name)
+    logger.info("=" * 70)
+
+    train_loader, val_loader, test_loader = _build_loaders(config)
+
+    result: dict[str, Any] = train_model(
+        model_name=model_name,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        test_loader=test_loader,
+        config=config,
+        output_dir=config.RESULTS_DIR,
+    )
+
+    mpath.write_text(
+        json.dumps(result, indent=2, ensure_ascii=False, default=str),
+        encoding="utf-8",
+    )
+    logger.info("Метрики модели '%s' сохранены: %s", model_name, mpath)
+    return result
+
+
+def build_comparison(config: type[Config] = Config) -> Any:
+    """Собирает метрики всех обученных моделей С ДИСКА и формирует итоги.
+
+    Читает ``results/<модель>_metrics.json`` для каждой модели из
+    ``config.MODEL_NAMES`` и создаёт:
+
+    * ``comparison.csv`` и ``comparison.xlsx`` (сравнительная таблица);
+    * ``analysis.txt`` (текстовый анализ, также выводится на печать).
+
+    Функцию можно запускать независимо и повторно (даже в новой сессии): она
+    использует те модели, метрики которых уже есть на диске, и предупреждает
+    о недостающих.
+
+    Parameters
+    ----------
+    config:
+        Класс ``Config`` (не экземпляр).
+
+    Returns
+    -------
+    pandas.DataFrame | None
+        Таблица сравнения, либо ``None`` если ни одна модель ещё не обучена.
+    """
+    results: list[dict[str, Any]] = []
+    missing: list[str] = []
+    for name in config.MODEL_NAMES:
+        mpath = _metrics_path(config, name)
+        if mpath.exists():
+            results.append(json.loads(mpath.read_text(encoding="utf-8")))
+        else:
+            missing.append(name)
+
+    if missing:
+        logger.warning(
+            "Нет метрик для моделей: %s (они ещё не обучены).",
+            ", ".join(missing),
+        )
+    if not results:
+        logger.error(
+            "Не найдено ни одной обученной модели — сначала запустите train_one(...)."
+        )
+        return None
+
+    logger.info("Формирую сравнение по %d модели(ям) …", len(results))
+    save_comparison_table(results=results, save_dir=config.RESULTS_DIR)
+    logger.info(
+        "Таблица сохранена: %s",
+        config.RESULTS_DIR / "comparison.csv",
+    )
+
+    analysis_text: str = analyze_results(results)
+    (config.RESULTS_DIR / "analysis.txt").write_text(
+        analysis_text, encoding="utf-8"
+    )
+    logger.info("Анализ сохранён: %s", config.RESULTS_DIR / "analysis.txt")
+    print(analysis_text)
+
+    import pandas as pd
+
+    return pd.read_csv(config.RESULTS_DIR / "comparison.csv")
+
+
+# ---------------------------------------------------------------------------
 # run_full_pipeline
 # ---------------------------------------------------------------------------
 
@@ -630,6 +831,7 @@ def run_full_pipeline(config: type[Config]) -> list[dict[str, Any]]:
     data_root: Path = download_and_prepare_dataset(
         data_dir=config.DATA_DIR,
         seed=config.SEED,
+        max_per_class=config.MAX_PER_CLASS,
     )
 
     # ------------------------------------------------------------------
