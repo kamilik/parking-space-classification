@@ -4,10 +4,9 @@ dataset.py — Загрузка, подготовка датасета PKLot и 
 Этот модуль обрабатывает все этапы подготовки данных для классификатора
 занятости парковочных мест:
 
-1. Загрузка датасета PKLot с Kaggle через kagglehub.
-2. Разбиение по парковкам:
-   - train / val — PUCPR + UFPR04 (все погоды), стратифицированное 85 / 15.
-   - test — UFPR05 (все погоды).
+1. Загрузка архива PKLotSegmented напрямую с сайта UFPR.
+2. Разбиение всех изображений (со всех парковок: PUCPR, UFPR04, UFPR05)
+   на train / val / test в соотношении 70 / 15 / 15 со стратификацией.
 3. Копирование в структуру директорий ``torchvision.datasets.ImageFolder``::
 
        data_dir/
@@ -67,9 +66,8 @@ logger = logging.getLogger(__name__)
 # Идентификатор датасета на Kaggle.
 _KAGGLE_DATASET: str = "blanderbuss/parking-lot-dataset"
 
-# Парковки для обучения и тестирования.
-_TRAIN_LOTS: tuple[str, ...] = ("PUCPR", "UFPR04")
-_TEST_LOT: str = "UFPR05"
+# Известные парковки внутри датасета.
+_PARKING_LOTS: tuple[str, ...] = ("PUCPR", "UFPR04", "UFPR05")
 
 # Допустимые расширения изображений (строчные).
 _IMAGE_EXTENSIONS: frozenset[str] = frozenset({".jpg", ".jpeg", ".png"})
@@ -77,8 +75,10 @@ _IMAGE_EXTENSIONS: frozenset[str] = frozenset({".jpg", ".jpeg", ".png"})
 _SPLIT_NAMES: tuple[str, ...] = ("train", "val", "test")
 _CLASS_NAMES: tuple[str, ...] = ("Empty", "Occupied")
 
-# Доля валидации внутри обучающих парковок (PUCPR + UFPR04).
+# Соотношения разбиений.
+_TRAIN_RATIO: float = 0.70
 _VAL_RATIO: float = 0.15
+# Доля теста = 1 - _TRAIN_RATIO - _VAL_RATIO = 0.15  (вычисляется автоматически)
 
 # Настройки DataLoader
 _NUM_WORKERS: int = 2
@@ -172,48 +172,24 @@ def _build_empty_imagefolder_tree(data_dir: Path) -> None:
 
 def _download_kaggle(dataset_id: str) -> Path:
     """
-    Загружает датасет PKLot с Kaggle и возвращает путь к корню
-    с парковками (директория, содержащая PUCPR / UFPR04 / UFPR05).
+    Загружает датасет PKLot с Kaggle через библиотеку kagglehub.
+
+    Параметры
+    ----------
+    dataset_id:
+        Идентификатор датасета на Kaggle (``"blanderbuss/parking-lot-dataset"``).
+
+    Возвращает
+    ----------
+    Path
+        Путь к корню загруженного датасета.
     """
     import kagglehub  # type: ignore[import]
 
     logger.info("Загрузка датасета '%s' с Kaggle …", dataset_id)
-    raw_path = Path(kagglehub.dataset_download(dataset_id))
-    logger.info("Датасет загружен: %s", raw_path)
-
-    root = _find_image_root(raw_path)
-    logger.info("Корень изображений: %s", root)
-    return root
-
-
-def _find_image_root(base: Path) -> Path:
-    """
-    Рекурсивно ищет директорию, содержащую папки парковок
-    (PUCPR, UFPR04, UFPR05). Kaggle может вложить данные на
-    произвольную глубину.
-    """
-    lot_names = set(_TRAIN_LOTS) | {_TEST_LOT}
-
-    if lot_names.issubset({d.name for d in base.iterdir() if d.is_dir()}):
-        return base
-
-    for child in sorted(base.iterdir()):
-        if not child.is_dir():
-            continue
-        try:
-            subdirs = {d.name for d in child.iterdir() if d.is_dir()}
-        except PermissionError:
-            continue
-        if lot_names.issubset(subdirs):
-            return child
-        found = _find_image_root(child)
-        if found != child:
-            return found
-
-    raise RuntimeError(
-        f"Не удалось найти директорию с парковками {lot_names} "
-        f"внутри {base}. Проверьте структуру загруженного датасета."
-    )
+    path = kagglehub.dataset_download(dataset_id)
+    logger.info("Датасет загружен: %s", path)
+    return Path(path)
 
 
 def _collect_all_images(
@@ -300,46 +276,51 @@ def _collect_all_images(
     return records
 
 
-def _split_by_parking_lot(
+def _split_samples_randomly(
     records: list[tuple[Path, str, str]],
-    extracted_root: Path,
     seed: int,
 ) -> dict[str, list[tuple[Path, str, str]]]:
     """
-    Разбиение по парковкам: PUCPR + UFPR04 → train/val, UFPR05 → test.
+    Стратифицированное случайное разбиение на train / val / test.
 
-    Внутри обучающих парковок выполняется стратифицированное разбиение
-    на train / val (85 / 15) для сохранения баланса классов.
+    Все изображения из ВСЕХ парковок смешиваются перед разбиением,
+    чтобы каждое разбиение содержало данные от каждой парковки.
+
+    Использует ``sklearn.model_selection.train_test_split`` со ``stratify``
+    для сохранения соотношения классов во всех трёх разбиениях.
+
+    Параметры
+    ----------
+    records:
+        Полный список кортежей ``(filepath, class_name, unique_filename)``.
+    seed:
+        Случайное зерно для воспроизводимости.
+
+    Возвращает
+    ----------
+    dict с ключами ``"train"``, ``"val"``, ``"test"``.
     """
-    train_lot_names = {lot.lower() for lot in _TRAIN_LOTS}
-    test_lot_name = _TEST_LOT.lower()
+    labels = [cls for _, cls, _ in records]
 
-    train_val_records: list[tuple[Path, str, str]] = []
-    test_records: list[tuple[Path, str, str]] = []
-
-    for rec in records:
-        src_path = rec[0]
-        try:
-            lot_name = src_path.relative_to(extracted_root).parts[0].lower()
-        except (ValueError, IndexError):
-            continue
-
-        if lot_name == test_lot_name:
-            test_records.append(rec)
-        elif lot_name in train_lot_names:
-            train_val_records.append(rec)
-
-    labels = [cls for _, cls, _ in train_val_records]
-    train_records, val_records = train_test_split(
-        train_val_records,
-        test_size=_VAL_RATIO,
+    # Первое разбиение: train vs. (val + test)
+    train_records, remaining_records = train_test_split(
+        records,
+        test_size=1.0 - _TRAIN_RATIO,
         stratify=labels,
         random_state=seed,
     )
 
+    # Второе разбиение: val vs. test (равные половины оставшейся части)
+    remaining_labels = [cls for _, cls, _ in remaining_records]
+    val_records, test_records = train_test_split(
+        remaining_records,
+        test_size=0.5,  # 50% от оставшихся 30% = 15% общего объёма
+        stratify=remaining_labels,
+        random_state=seed,
+    )
+
     logger.info(
-        "Разбиение по парковкам — train=%d (PUCPR+UFPR04 85%%) | "
-        "val=%d (PUCPR+UFPR04 15%%) | test=%d (UFPR05)",
+        "Стратифицированное разбиение — train=%d | val=%d | test=%d",
         len(train_records),
         len(val_records),
         len(test_records),
@@ -479,11 +460,39 @@ def _count_existing_dataset(data_dir: Path) -> DatasetInfo:
 
 def download_and_prepare_dataset(data_dir: Path, seed: int = 42) -> Path:
     """
-    Загружает датасет PKLot с Kaggle и организует его в структуру ImageFolder.
+    Загружает датасет PKLot с Kaggle и организует его в структуру
+    директорий, совместимую с ImageFolder.
 
-    Разбиение по парковкам:
-    - train / val — PUCPR + UFPR04 (все погоды), стратификация 85 / 15.
-    - test — UFPR05 (все погоды).
+    Последовательность шагов
+    ------------------------
+    1. Проверка наличия уже подготовленной структуры (быстрый выход).
+    2. Загрузка датасета с Kaggle через kagglehub.
+    3. Обход дерева файлов и сбор всех изображений со всех
+       парковок (PUCPR, UFPR04, UFPR05).
+    4. Стратифицированное случайное разбиение 70 / 15 / 15 по метке класса.
+       **Все три парковки присутствуют в каждом разбиении.**
+    5. Копирование изображений в дерево ImageFolder.
+    6. Логирование статистики по разбиениям, классам и парковкам.
+    7. Запись файла-сторожа.
+
+    Параметры
+    ----------
+    data_dir:
+        Корневая директория, в которой будет создано дерево ImageFolder.
+        Обычно ``Config.DATA_DIR`` (``project/data/``).
+    seed:
+        Случайное зерно для стратифицированных разбиений (по умолчанию 42).
+
+    Возвращает
+    ----------
+    Path
+        ``data_dir`` — корень подготовленного дерева ImageFolder.
+
+    Исключения
+    ----------
+    RuntimeError
+        Если после загрузки и распаковки не найдено ни одного допустимого
+        изображения.
     """
     data_dir = Path(data_dir)
 
@@ -504,7 +513,14 @@ def download_and_prepare_dataset(data_dir: Path, seed: int = 42) -> Path:
     # ------------------------------------------------------------------
     # Шаг 1: Загрузка датасета с Kaggle
     # ------------------------------------------------------------------
-    extracted_root = _download_kaggle(_KAGGLE_DATASET)
+    kaggle_path = _download_kaggle(_KAGGLE_DATASET)
+
+    # Ищем корень PKLotSegmented внутри загруженной директории.
+    extracted_root = kaggle_path
+    for candidate in [kaggle_path / "PKLotSegmented", kaggle_path]:
+        if any(candidate.iterdir()):
+            extracted_root = candidate
+            break
 
     # ------------------------------------------------------------------
     # Шаг 2: Сбор всех изображений со всех парковок
@@ -513,21 +529,20 @@ def download_and_prepare_dataset(data_dir: Path, seed: int = 42) -> Path:
 
     if not all_records:
         raise RuntimeError(
-            "Не найдено ни одного изображения в загруженном датасете PKLot. "
+            "Не найдено ни одного изображения в распакованном архиве PKLotSegmented. "
             "Проверьте корректность загрузки и структуру архива."
         )
 
     # ------------------------------------------------------------------
-    # Шаг 3: Разбиение по парковкам
+    # Шаг 3: Стратифицированное разбиение 70 / 15 / 15
     # ------------------------------------------------------------------
     logger.info(
-        "Разбиение по парковкам: train/val=%s, test=%s (%d изображений, seed=%d).",
-        _TRAIN_LOTS,
-        _TEST_LOT,
+        "Применяется стратифицированное разбиение 70/15/15 "
+        "(%d изображений, seed=%d).",
         len(all_records),
         seed,
     )
-    split_records = _split_by_parking_lot(all_records, extracted_root, seed=seed)
+    split_records = _split_samples_randomly(all_records, seed=seed)
 
     # ------------------------------------------------------------------
     # Шаг 4: Создание дерева директорий ImageFolder
