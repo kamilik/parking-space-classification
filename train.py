@@ -255,6 +255,48 @@ def evaluate(
 # train_model
 # ---------------------------------------------------------------------------
 
+def _save_epoch_checkpoint(
+    model: nn.Module,
+    safe_name: str,
+    epoch: int,
+    val_f1: float,
+    config: type[Config],
+) -> None:
+    """Сохраняет веса модели после эпохи (обычно на Google Drive).
+
+    Управляется флагами ``config.SAVE_EVERY_EPOCH`` и
+    ``config.EPOCH_CKPT_KEEP_LAST``. Файлы кладутся в
+    ``<EPOCH_CHECKPOINTS_DIR>/<модель>/<модель>_epochNN.pth``. Если задан
+    ``EPOCH_CKPT_KEEP_LAST``, старые чекпоинты этой модели удаляются, оставляя
+    только N последних (экономия места на Диске).
+    """
+    if not getattr(config, "SAVE_EVERY_EPOCH", False):
+        return
+
+    base: Path = config.EPOCH_CHECKPOINTS_DIR or (
+        config.SAVED_MODELS_DIR / "epoch_checkpoints"
+    )
+    ep_dir: Path = Path(base) / safe_name
+    ep_dir.mkdir(parents=True, exist_ok=True)
+
+    ckpt: Path = ep_dir / f"{safe_name}_epoch{epoch:02d}.pth"
+    torch.save(model.state_dict(), ckpt)
+    logger.info(
+        "Чекпоинт эпохи %d сохранён: %s (val_f1=%.4f)", epoch, ckpt, val_f1
+    )
+
+    keep = getattr(config, "EPOCH_CKPT_KEEP_LAST", None)
+    if keep:
+        existing = sorted(ep_dir.glob(f"{safe_name}_epoch*.pth"))
+        for old in existing[:-keep]:
+            old.unlink()
+            logger.info(
+                "Удалён старый чекпоинт (храним %d последних): %s",
+                keep,
+                old.name,
+            )
+
+
 def train_model(
     model_name: str,
     train_loader: DataLoader,
@@ -410,8 +452,12 @@ def train_model(
             val_f1,
         )
 
-        # ModelCheckpoint — сохраняем, если F1-мера на валидации улучшилась.
+        # ModelCheckpoint — сохраняем лучшую модель, если F1 улучшился.
         model_checkpoint(val_f1, model)
+
+        # Чекпоинт КАЖДОЙ эпохи (обычно на Google Drive) — переживает
+        # отключение среды выполнения Colab.
+        _save_epoch_checkpoint(model, safe_name, epoch, val_f1, config)
 
         # EarlyStopping — останавливаем, если F1 не улучшается в течение PATIENCE эпох.
         if early_stopping(val_f1):

@@ -130,6 +130,58 @@ class Config:
     #: История предсказаний Streamlit
     HISTORY_FILE: Path = Path(__file__).resolve().parent / "history.json"
 
+    # ------------------------------------------------------------------
+    # Сохранение чекпоинтов по эпохам (в т.ч. на Google Drive)
+    # ------------------------------------------------------------------
+    #: Сохранять ли веса модели после КАЖДОЙ эпохи (не только лучшую).
+    SAVE_EVERY_EPOCH: bool = True
+
+    #: Директория для чекпоинтов каждой эпохи. ``None`` — использовать
+    #: ``SAVED_MODELS_DIR / "epoch_checkpoints"``. Задаётся ``enable_gdrive()``
+    #: для сохранения на Google Drive (переживает отключение среды Colab).
+    EPOCH_CHECKPOINTS_DIR: Path | None = None
+
+    #: Сколько последних чекпоинтов эпох хранить на модель (экономия места).
+    #: ``None`` — хранить все эпохи; например ``3`` — только 3 последних.
+    EPOCH_CKPT_KEEP_LAST: int | None = None
+
+    @classmethod
+    def enable_gdrive(
+        cls,
+        root: str | Path = "/content/drive/MyDrive/pklot_project",
+    ) -> None:
+        """
+        Перенаправляет сохранение артефактов на Google Drive.
+
+        После вызова чекпоинты эпох, лучшие модели и результаты пишутся в
+        подкаталоги ``root`` на смонтированном Google Drive и переживают даже
+        удаление среды выполнения Colab. Директория с данными (``DATA_DIR``)
+        намеренно остаётся локальной — чтение обучающих изображений напрямую
+        с Диска было бы слишком медленным.
+
+        Параметры
+        ----------
+        root:
+            Корневая папка проекта на Google Drive (создаётся при необходимости).
+        """
+        root = Path(root)
+        cls.SAVED_MODELS_DIR = root / "saved_models"
+        cls.RESULTS_DIR = root / "results"
+        cls.PLOTS_DIR = root / "plots"
+        cls.EPOCH_CHECKPOINTS_DIR = root / "checkpoints"
+        for _d in (
+            cls.SAVED_MODELS_DIR,
+            cls.RESULTS_DIR,
+            cls.PLOTS_DIR,
+            cls.EPOCH_CHECKPOINTS_DIR,
+        ):
+            _d.mkdir(parents=True, exist_ok=True)
+        logger.info(
+            "Google Drive включён — артефакты сохраняются в '%s' "
+            "(saved_models / results / plots / checkpoints).",
+            root,
+        )
+
 
 # ---------------------------------------------------------------------------
 # Создание необходимых директорий при импорте
