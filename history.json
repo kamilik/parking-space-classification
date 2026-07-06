@@ -82,5 +82,47 @@
     "filename": "9a8a8862-3989-4676-9779-56b7dc9fd4ca.jpg",
     "result": "Occupied",
     "confidence": 0.9981
+  },
+  {
+    "date": "2026-07-06",
+    "time": "20:14:53",
+    "filename": "telegram-cloud-photo-size-2-5350603410945808897-y.jpg",
+    "result": "Occupied",
+    "confidence": 0.9986
+  },
+  {
+    "date": "2026-07-06",
+    "time": "20:15:42",
+    "filename": "telegram-cloud-photo-size-2-5350.jpg",
+    "result": "Empty",
+    "confidence": 1.0
+  },
+  {
+    "date": "2026-07-06",
+    "time": "20:16:11",
+    "filename": "telegram-cloud-photo-size-2-5350799510562608999-m.jpg",
+    "result": "Occupied",
+    "confidence": 1.0
+  },
+  {
+    "date": "2026-07-06",
+    "time": "20:16:25",
+    "filename": "telegram-cloud-photo-size-2-5350.jpg",
+    "result": "Empty",
+    "confidence": 1.0
+  },
+  {
+    "date": "2026-07-06",
+    "time": "20:17:12",
+    "filename": "9a8a8862-3989-4676-9779-56b7dc9fd4ca.jpg",
+    "result": "Occupied",
+    "confidence": 1.0
+  },
+  {
+    "date": "2026-07-06",
+    "time": "20:20:33",
+    "filename": "2026-07-06 20.20.21.jpg",
+    "result": "Empty",
+    "confidence": 0.9941
   }
 ]
