@@ -438,53 +438,12 @@ def _compute_statistics(
 
 def _render_sidebar(
     history: list[dict[str, Any]],
-    available_models: list[tuple[str, Path]],
-) -> tuple[str | None, Path | None]:
+) -> None:
     """
-    Отрисовывает боковую панель: выбор модели, статистика, последние проверки, кнопка очистки.
-
-    Parameters
-    ----------
-    history:
-        Текущий список истории предсказаний.
-    available_models:
-        Список пар ``(display_name, path)``, возвращённых
-        ``_discover_models()``.
-
-    Returns
-    -------
-    tuple[str | None, Path | None]
-        ``(selected_model_name, selected_model_path)`` — оба ``None``, если нет
-        доступных моделей.
+    Отрисовывает боковую панель: статистика, последние проверки, кнопка очистки.
     """
     with st.sidebar:
         st.markdown("## Parking Spot Classifier")
-        st.markdown("---")
-
-        # ── Выбор модели ───────────────────────────────────────────────────
-        st.markdown("### Model Selection")
-
-        selected_name: str | None = None
-        selected_path: Path | None = None
-
-        if not available_models:
-            st.warning(
-                "No trained models found in `saved_models/`.\n\n"
-                "Train the models first by running `train.py`."
-            )
-        else:
-            model_labels = [name for name, _ in available_models]
-            model_index = st.selectbox(
-                label="Select architecture",
-                options=range(len(model_labels)),
-                format_func=lambda i: model_labels[i],
-                index=0,
-                key="model_selector",
-            )
-            selected_name = model_labels[model_index]
-            selected_path = available_models[model_index][1]
-            st.caption(f"Checkpoint: `{selected_path.name}`")
-
         st.markdown("---")
 
         # ── Статистика ─────────────────────────────────────────────────────
@@ -504,7 +463,7 @@ def _render_sidebar(
 
         # ── Последние проверки ─────────────────────────────────────────────
         st.markdown("### Recent Checks")
-        recent = history[-RECENT_CHECKS_LIMIT:][::-1]  # сначала новейшие, не более 10
+        recent = history[-RECENT_CHECKS_LIMIT:][::-1]
 
         if not recent:
             st.caption("No predictions yet.")
@@ -536,17 +495,10 @@ def _render_sidebar(
             st.session_state["history"] = []
             st.rerun()
 
-    return selected_name, selected_path
 
-
-def _render_result_card(result: PredictionResult) -> None:
+def _render_result_card(model_name: str, result: PredictionResult) -> None:
     """
-    Отрисовывает стилизованную карточку результата с предсказанной меткой и уверенностью.
-
-    Parameters
-    ----------
-    result:
-        ``PredictionResult`` для отображения.
+    Отрисовывает компактную карточку результата для одной модели.
     """
     is_empty = result.label == "Empty"
     color = "#3fb950" if is_empty else "#f85149"
@@ -560,42 +512,36 @@ def _render_result_card(result: PredictionResult) -> None:
             background: #161b22;
             border: 2px solid {color};
             border-radius: 12px;
-            padding: 2rem 2.5rem;
+            padding: 1rem;
             text-align: center;
-            margin: 1rem 0;
+            margin: 0.5rem 0;
         ">
-            <div style="font-size: 3rem; margin-bottom: 0.5rem;">{icon}</div>
+            <div style="font-size: 0.85rem; color: #8b949e; margin-bottom: 0.3rem;
+                         font-weight: 600;">{model_name}</div>
+            <div style="font-size: 2rem; margin-bottom: 0.3rem;">{icon}</div>
             <div style="
-                font-size: 2.5rem;
+                font-size: 1.5rem;
                 font-weight: 800;
                 color: {color};
-                letter-spacing: 2px;
-                margin-bottom: 0.5rem;
+                letter-spacing: 1px;
             ">{label_text}</div>
             <div style="
-                font-size: 1.4rem;
+                font-size: 1.1rem;
                 color: #c9d1d9;
                 font-weight: 500;
-            ">Confidence: <strong style="color:{color};">{conf_pct:.2f}%</strong></div>
-            <div style="margin-top: 1rem;">
-                <div style="
-                    display: inline-block;
-                    background: #21262d;
-                    border-radius: 20px;
-                    padding: 0.3rem 1rem;
-                    font-size: 0.9rem;
-                    color: #8b949e;
-                ">
-                    Empty: {result.probabilities.get("Empty", 0.0)*100:.1f}% &nbsp;|&nbsp;
-                    Occupied: {result.probabilities.get("Occupied", 0.0)*100:.1f}%
-                </div>
+                margin-top: 0.3rem;
+            "><strong style="color:{color};">{conf_pct:.2f}%</strong></div>
+            <div style="margin-top: 0.5rem;
+                        font-size: 0.75rem; color: #8b949e;">
+                Empty: {result.probabilities.get("Empty", 0.0)*100:.1f}% |
+                Occupied: {result.probabilities.get("Occupied", 0.0)*100:.1f}%
             </div>
             <div style="
-                margin-top: 0.75rem;
-                font-size: 0.8rem;
+                margin-top: 0.4rem;
+                font-size: 0.7rem;
                 color: #484f58;
             ">
-                Inference time: {result.inference_time_ms:.2f} ms
+                {result.inference_time_ms:.1f} ms
             </div>
         </div>
         """,
@@ -653,12 +599,8 @@ def _render_history_table(history: list[dict[str, Any]]) -> None:
 def main() -> None:
     """
     Точка входа приложения Streamlit.
-
-    Данная функция настраивает страницу, инжектирует CSS тёмной темы, отрисовывает
-    боковую панель и основную область контента, обрабатывает загрузку файлов, запускает предсказания и
-    ведёт историю предсказаний.
+    Запускает инференс сразу всех 5 моделей и показывает результаты в столбцах.
     """
-    # ── Конфигурация страницы ──────────────────────────────────────────────
     st.set_page_config(
         page_title="Parking Spot Classifier",
         page_icon="🅿",
@@ -666,143 +608,104 @@ def main() -> None:
         initial_sidebar_state="expanded",
     )
 
-    # ── Инжекция CSS тёмной темы ───────────────────────────────────────────
     st.markdown(_DARK_THEME_CSS, unsafe_allow_html=True)
 
-    # ── Инициализация состояния сессии ─────────────────────────────────────
     if "history" not in st.session_state:
         st.session_state["history"] = load_history(HISTORY_FILE)
 
     history: list[dict[str, Any]] = st.session_state["history"]
-
-    # ── Обнаружение доступных моделей ─────────────────────────────────────
     available_models = _discover_models()
 
-    # ── Боковая панель ─────────────────────────────────────────────────────
-    selected_model_name, selected_model_path = _render_sidebar(
-        history=history,
-        available_models=available_models,
-    )
+    _render_sidebar(history=history)
 
-    # ── Основная область контента ──────────────────────────────────────────
     st.markdown(
         "<h1>Parking Spot Occupancy Classifier</h1>",
         unsafe_allow_html=True,
     )
     st.markdown(
         "<p style='font-size:1.1rem; color:#8b949e; margin-top:-0.5rem;'>"
-        "Upload an image of a single parking space to determine whether it is "
-        "<strong style='color:#3fb950;'>Empty</strong> or "
-        "<strong style='color:#f85149;'>Occupied</strong>."
+        "Upload an image of a single parking space — all 5 models will classify it simultaneously."
         "</p>",
         unsafe_allow_html=True,
     )
 
     st.markdown("---")
 
-    # ── Двухколоночная разметка: загрузчик слева, результат справа ────────
-    col_upload, col_result = st.columns([1, 1], gap="large")
+    st.markdown("### Upload Image")
+    uploaded_file = st.file_uploader(
+        label="Choose a parking spot image",
+        type=ALLOWED_EXTENSIONS,
+        accept_multiple_files=False,
+        key="file_uploader",
+    )
 
-    with col_upload:
-        st.markdown("### Upload Image")
-        uploaded_file = st.file_uploader(
-            label="Choose a parking spot image",
-            type=ALLOWED_EXTENSIONS,
-            accept_multiple_files=False,
-            key="file_uploader",
+    if uploaded_file is not None:
+        st.image(
+            uploaded_file,
+            caption=f"Uploaded: {uploaded_file.name}",
+            width=300,
         )
 
-        if uploaded_file is not None:
-            st.image(
-                uploaded_file,
-                caption=f"Uploaded: {uploaded_file.name}",
-                use_container_width=True,
-            )
+        determine_clicked = st.button(
+            "Определить",
+            type="primary",
+            key="determine_button",
+        )
 
-    with col_result:
-        st.markdown("### Result")
+        if determine_clicked:
+            if not available_models:
+                st.error(
+                    "No trained models found in `saved_models/`. "
+                    "Train the models first by running `train.py`."
+                )
+            else:
+                suffix = Path(uploaded_file.name).suffix or ".jpg"
+                with tempfile.NamedTemporaryFile(
+                    suffix=suffix, delete=False
+                ) as tmp:
+                    tmp.write(uploaded_file.read())
+                    tmp_image_path = Path(tmp.name)
 
-        if uploaded_file is None:
-            st.markdown(
-                "<div style='color:#484f58; padding: 2rem; text-align:center;'>"
-                "No image uploaded yet."
-                "</div>",
-                unsafe_allow_html=True,
-            )
+                try:
+                    results: list[tuple[str, PredictionResult]] = []
 
-        else:
-            # Показываем кнопку «Определить» только при наличии изображения.
-            determine_clicked = st.button(
-                "Определить",
-                type="primary",
-                use_container_width=True,
-                key="determine_button",
-            )
-
-            if determine_clicked:
-                if selected_model_name is None or selected_model_path is None:
-                    st.error(
-                        "No model selected.  Train the models first and place "
-                        "`*.pth` files inside the `saved_models/` directory."
-                    )
-                else:
-                    # Сохраняем загруженные байты во временный файл, чтобы
-                    # ParkingPredictor (ожидающий путь в файловой системе) мог
-                    # его прочитать. Временный файл автоматически удаляется
-                    # после выхода из блока `with`.
-                    suffix = Path(uploaded_file.name).suffix or ".jpg"
-                    with tempfile.NamedTemporaryFile(
-                        suffix=suffix, delete=False
-                    ) as tmp:
-                        tmp.write(uploaded_file.read())
-                        tmp_image_path = Path(tmp.name)
-
-                    try:
-                        with st.spinner(
-                            f"Running {selected_model_name} inference …"
-                        ):
+                    with st.spinner("Running inference on all models …"):
+                        for model_name, model_path in available_models:
                             predictor = _load_predictor(
-                                model_name=selected_model_name,
-                                model_path_str=str(selected_model_path),
+                                model_name=model_name,
+                                model_path_str=str(model_path),
                             )
-                            prediction: PredictionResult = predictor.predict(
-                                tmp_image_path
-                            )
+                            prediction = predictor.predict(tmp_image_path)
+                            results.append((model_name, prediction))
 
-                        # Отрисовываем карточку результата.
-                        _render_result_card(prediction)
+                    st.markdown("### Results")
+                    cols = st.columns(len(results))
+                    for col, (model_name, prediction) in zip(cols, results):
+                        with col:
+                            _render_result_card(model_name, prediction)
 
-                        # Добавляем в историю и сохраняем.
-                        entry = _build_history_entry(
-                            filename=uploaded_file.name,
-                            result=prediction,
-                        )
-                        history.append(entry)
-                        st.session_state["history"] = history
-                        save_history(history, HISTORY_FILE)
+                    best_result = max(results, key=lambda r: r[1].confidence)
+                    entry = _build_history_entry(
+                        filename=uploaded_file.name,
+                        result=best_result[1],
+                    )
+                    history.append(entry)
+                    st.session_state["history"] = history
+                    save_history(history, HISTORY_FILE)
 
-                        logger.info(
-                            "Prediction recorded: file=%s, label=%s, confidence=%.4f",
-                            uploaded_file.name,
-                            prediction.label,
-                            prediction.confidence,
-                        )
+                except FileNotFoundError as exc:
+                    st.error(f"Model file not found: {exc}")
+                    logger.error("Model not found: %s", exc)
+                except RuntimeError as exc:
+                    st.error(f"Inference error: {exc}")
+                    logger.error("Inference error: %s", exc)
+                except Exception as exc:
+                    st.error(f"Unexpected error during prediction: {exc}")
+                    logger.exception("Unexpected prediction error.")
+                finally:
+                    if tmp_image_path.exists():
+                        tmp_image_path.unlink(missing_ok=True)
 
-                    except FileNotFoundError as exc:
-                        st.error(f"Model file not found: {exc}")
-                        logger.error("Model not found: %s", exc)
-                    except RuntimeError as exc:
-                        st.error(f"Inference error: {exc}")
-                        logger.error("Inference error: %s", exc)
-                    except Exception as exc:  # pylint: disable=broad-except
-                        st.error(f"Unexpected error during prediction: {exc}")
-                        logger.exception("Unexpected prediction error.")
-                    finally:
-                        # Всегда удаляем временный файл изображения.
-                        if tmp_image_path.exists():
-                            tmp_image_path.unlink(missing_ok=True)
-
-    # ── Таблица истории ────────────────────────────────────────────────────
     st.markdown("---")
     st.markdown("### Prediction History")
     _render_history_table(history)

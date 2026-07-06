@@ -1,1 +1,86 @@
-[]
+[
+  {
+    "date": "2026-07-03",
+    "time": "20:44:17",
+    "filename": "telegram-cloud-photo-size-2-5350799510562608999-m.jpg",
+    "result": "Occupied",
+    "confidence": 0.999
+  },
+  {
+    "date": "2026-07-03",
+    "time": "20:44:41",
+    "filename": "telegram-cloud-photo-size-2-5350799510562608999-m.jpg",
+    "result": "Occupied",
+    "confidence": 1.0
+  },
+  {
+    "date": "2026-07-03",
+    "time": "20:44:57",
+    "filename": "telegram-cloud-photo-size-2-5350799510562608999-m.jpg",
+    "result": "Occupied",
+    "confidence": 1.0
+  },
+  {
+    "date": "2026-07-03",
+    "time": "20:46:14",
+    "filename": "telegram-cloud-photo-size-2-5350799510562609007-m.jpg",
+    "result": "Empty",
+    "confidence": 1.0
+  },
+  {
+    "date": "2026-07-03",
+    "time": "20:46:31",
+    "filename": "telegram-cloud-photo-size-2-5350799510562609007-m.jpg",
+    "result": "Empty",
+    "confidence": 0.9984
+  },
+  {
+    "date": "2026-07-03",
+    "time": "20:46:45",
+    "filename": "telegram-cloud-photo-size-2-5350799510562609007-m.jpg",
+    "result": "Empty",
+    "confidence": 0.9984
+  },
+  {
+    "date": "2026-07-03",
+    "time": "20:50:34",
+    "filename": "telegram-cloud-photo-size-2-5350.jpg",
+    "result": "Empty",
+    "confidence": 0.9979
+  },
+  {
+    "date": "2026-07-03",
+    "time": "20:50:51",
+    "filename": "telegram-cloud-photo-size-2-5350.jpg",
+    "result": "Empty",
+    "confidence": 1.0
+  },
+  {
+    "date": "2026-07-03",
+    "time": "20:51:04",
+    "filename": "telegram-cloud-photo-size-2-5350 (2).jpg",
+    "result": "Occupied",
+    "confidence": 1.0
+  },
+  {
+    "date": "2026-07-03",
+    "time": "20:51:27",
+    "filename": "9a8a8862-3989-4676-9779-56b7dc9fd4ca.jpg",
+    "result": "Occupied",
+    "confidence": 0.9993
+  },
+  {
+    "date": "2026-07-03",
+    "time": "20:51:53",
+    "filename": "9a8a8862-3989-4676-9779-56b7dc9fd4ca.jpg",
+    "result": "Occupied",
+    "confidence": 0.9999
+  },
+  {
+    "date": "2026-07-03",
+    "time": "20:52:05",
+    "filename": "9a8a8862-3989-4676-9779-56b7dc9fd4ca.jpg",
+    "result": "Occupied",
+    "confidence": 0.9981
+  }
+]
