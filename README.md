@@ -33,7 +33,7 @@ https://github.com/kamilik/parking-space-classification/raw/main/demo.mp4
 
 ## Результаты тестирования
 
-Отчёт тестирования лучшей модели на тестовой выборке с применением фильтров (Grayscale, Blur, Invert, Noise, Brightness, Darkness, Rain, Fog):
+Отчёт тестирования лучшей модели на тестовой выборке:
 
 [Открыть отчёт в Google Таблицах](https://docs.google.com/spreadsheets/d/1t3a8WYR_9FJdVpslNV7cJ_yxsmIYzxuo/edit?usp=sharing&ouid=106117983417935616464&rtpof=true&sd=true)
 
@@ -101,28 +101,6 @@ https://github.com/kamilik/parking-space-classification/raw/main/demo.mp4
 - Размер: ~330 МБ
 - Сильные стороны: глобальный контекст изображения, высокая точность на больших данных
 - Особенность: самая медленная и тяжёлая модель — обучается заметно дольше остальных
-
----
-
-## Структура проекта
-
-```
-parking-space-classification/
-├── config.py          # Центральная конфигурация (Config)
-├── dataset.py         # Загрузка PKLot с Kaggle, подвыборка, подготовка
-├── models.py          # 5 архитектур нейронных сетей
-├── utils.py           # Утилиты: метрики, графики, анализ, колбэки
-├── train.py           # Пайплайн обучения
-├── predict.py         # Модуль инференса
-├── app.py             # Streamlit-приложение
-├── notebook.ipynb     # Google Colab ноутбук
-├── requirements.txt   # Зависимости
-├── README.md          # Документация
-├── history.json       # История предсказаний (Streamlit)
-├── data/              # Подготовленный датасет (ImageFolder)
-├── saved_models/      # Лучшие веса каждой модели (.pth)
-└── results/           # Метрики, таблицы, графики, анализ
-```
 
 ---
 
@@ -221,19 +199,6 @@ Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 | NumPy | >= 1.24.0 | Численные вычисления |
 | openpyxl | >= 3.1.0 | Экспорт таблицы сравнения в XLSX |
 | tqdm | >= 4.65.0 | Прогресс-бары в цикле обучения |
-
----
-
-## Воспроизводимость
-
-Все случайные процессы фиксируются через `seed_everything(42)`:
-
-- `random.seed(42)`
-- `numpy.random.seed(42)`
-- `torch.manual_seed(42)`
-- `torch.cuda.manual_seed_all(42)`
-- `torch.backends.cudnn.deterministic = True`
-- `PYTHONHASHSEED=42`
 
 ---
 
