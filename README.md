@@ -6,6 +6,8 @@
 ![License](https://img.shields.io/badge/License-MIT-green)
 ![Task](https://img.shields.io/badge/Task-Binary%20Classification-purple)
 
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/kamilik/parking-space-classification/blob/main/notebook.ipynb)
+
 ## Демонстрация
 
 <video src="demo.mp4" width="320" height="240" controls></video>
