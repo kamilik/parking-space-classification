@@ -8,7 +8,7 @@
 
 ## Демонстрация
 
-https://github.com/kamilik/parking-space-classification/raw/main/demo.mp4
+<video src="demo.mp4" width="320" height="240" controls></video>
 
 ---
 
